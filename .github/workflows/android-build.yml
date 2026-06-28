@@ -90,25 +90,27 @@ jobs:
           const path = process.argv[2];
           let g = fs.readFileSync(path, 'utf8');
 
-          const releaseSigning = `
-            release {
-                if (project.hasProperty('KOKO_UPLOAD_STORE_FILE')) {
-                    storeFile file(KOKO_UPLOAD_STORE_FILE)
-                    storePassword KOKO_UPLOAD_STORE_PASSWORD
-                    keyAlias KOKO_UPLOAD_KEY_ALIAS
-                    keyPassword KOKO_UPLOAD_KEY_PASSWORD
-                }
+          const releaseSigning = `        release {
+            if (project.hasProperty('KOKO_UPLOAD_STORE_FILE')) {
+                storeFile file(KOKO_UPLOAD_STORE_FILE)
+                storePassword KOKO_UPLOAD_STORE_PASSWORD
+                keyAlias KOKO_UPLOAD_KEY_ALIAS
+                keyPassword KOKO_UPLOAD_KEY_PASSWORD
             }
-          `;
+        }
+`;
 
-          // Add a `release {}` signingConfig right after the `debug {}` one.
-          if (!/signingConfigs\s*\{[\s\S]*?release\s*\{/.test(g)) {
-            g = g.replace(/(signingConfigs\s*\{)/, `$1\n${releaseSigning}`);
+          // Idempotent: only patch once.
+          if (!g.includes('signingConfigs.release')) {
+            // Point the release *buildType* at a release signingConfig (leave the
+            // debug buildType untouched).
+            g = g.replace(
+              /(buildTypes\s*\{[\s\S]*?\brelease\s*\{[\s\S]*?)signingConfig\s+signingConfigs\.debug/,
+              `$1signingConfig signingConfigs.release`
+            );
+            // Insert the release signingConfig as the first entry of signingConfigs { }.
+            g = g.replace(/signingConfigs\s*\{\s*\n/, (m) => m + releaseSigning);
           }
-
-          // Point the release buildType to the release signingConfig.
-          g = g.replace(/(release\s*\{[\s\S]*?)signingConfig\s+signingConfigs\.debug/,
-                        `$1signingConfig signingConfigs.release`);
 
           fs.writeFileSync(path, g);
           console.log('Patched release signingConfig into', path);
