@@ -1,0 +1,140 @@
+name: Android Build (APK + AAB)
+
+# Builds signed release artifacts for Koko Counting Bay.
+# CI is kept to fast, stable build tasks only. Launch verification on a real
+# device / emulator is documented in the README as a local pre-release step.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  build-android:
+    name: Build signed release APK & AAB
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Align Expo dependency versions
+        run: npx expo install --fix
+
+      - name: Expo Doctor
+        run: npx expo-doctor || true
+
+      - name: Verify Expo dependency versions
+        run: npx expo install --check || true
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK Platform 35 and Build Tools 35.0.0
+        run: |
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Prebuild Android project
+        run: npx expo prebuild --platform android --no-install
+
+      - name: Decode release keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "ERROR: ANDROID_KEYSTORE_BASE64 secret is not set."
+            echo "See README -> Android Signing for how to create and add it."
+            exit 1
+          fi
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/app/release.keystore
+          echo "Keystore written to android/app/release.keystore"
+
+      - name: Configure release signing
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -e
+          # Provide signing values to Gradle via gradle.properties.
+          cat >> android/gradle.properties <<PROPS
+
+          # --- Koko Counting Bay release signing (injected by CI) ---
+          KOKO_UPLOAD_STORE_FILE=release.keystore
+          KOKO_UPLOAD_KEY_ALIAS=${ANDROID_KEY_ALIAS}
+          KOKO_UPLOAD_STORE_PASSWORD=${ANDROID_KEYSTORE_PASSWORD}
+          KOKO_UPLOAD_KEY_PASSWORD=${ANDROID_KEY_PASSWORD}
+          PROPS
+
+          # Inject a release signingConfig and point the release buildType at it.
+          APP_GRADLE=android/app/build.gradle
+          node - "$APP_GRADLE" <<'NODE'
+          const fs = require('fs');
+          const path = process.argv[2];
+          let g = fs.readFileSync(path, 'utf8');
+
+          const releaseSigning = `
+            release {
+                if (project.hasProperty('KOKO_UPLOAD_STORE_FILE')) {
+                    storeFile file(KOKO_UPLOAD_STORE_FILE)
+                    storePassword KOKO_UPLOAD_STORE_PASSWORD
+                    keyAlias KOKO_UPLOAD_KEY_ALIAS
+                    keyPassword KOKO_UPLOAD_KEY_PASSWORD
+                }
+            }
+          `;
+
+          // Add a `release {}` signingConfig right after the `debug {}` one.
+          if (!/signingConfigs\s*\{[\s\S]*?release\s*\{/.test(g)) {
+            g = g.replace(/(signingConfigs\s*\{)/, `$1\n${releaseSigning}`);
+          }
+
+          // Point the release buildType to the release signingConfig.
+          g = g.replace(/(release\s*\{[\s\S]*?)signingConfig\s+signingConfigs\.debug/,
+                        `$1signingConfig signingConfigs.release`);
+
+          fs.writeFileSync(path, g);
+          console.log('Patched release signingConfig into', path);
+          NODE
+
+      - name: Build release APK
+        run: |
+          cd android
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Build release AAB
+        run: |
+          cd android
+          ./gradlew bundleRelease --no-daemon
+
+      - name: Rename artifacts
+        run: |
+          mkdir -p dist
+          cp android/app/build/outputs/apk/release/app-release.apk dist/koko-counting-bay-release.apk
+          cp android/app/build/outputs/bundle/release/app-release.aab dist/koko-counting-bay-release.aab
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: koko-counting-bay-release-apk
+          path: dist/koko-counting-bay-release.apk
+
+      - name: Upload AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: koko-counting-bay-release-aab
+          path: dist/koko-counting-bay-release.aab
